@@ -71,8 +71,10 @@ def stack_identity(state_path: Path, runner=run_command, now=None):
         age = (now if now is not None else time.time()) - checked.timestamp()
     except (KeyError, TypeError, ValueError) as exc:
         raise FenceError("probe timestamp invalid") from exc
-    if not 0 <= age <= 600:
-        raise FenceError("stack probe receipt is stale")
+    # The initial zero-row probe precedes synthetic login bootstrap. Recheck
+    # live Docker identity now and require a fresh per-case backup later.
+    if not -5 <= age <= 3600:
+        raise FenceError("initial disposable stack provenance receipt is stale")
     ports = {}
     containers = {}
     volumes = {}
@@ -143,10 +145,52 @@ def verify_tenant_urls(stack, runner=run_command):
             raise FenceError("tenant JDBC URL points outside dedicated stack")
 
 
+def verify_snapshot(receipt_path: Path, stack, method, path, now=None):
+    """Verify private, recent pre-case MySQL and Redis artifacts; never log their contents."""
+    if receipt_path is None:
+        raise FenceError("pre-write snapshot receipt is required")
+    runtime = Path(stack["runtime_dir"])
+    location = Path(receipt_path).resolve(strict=True)
+    if location.parent != runtime or location.name != "prewrite-snapshot.json":
+        raise FenceError("snapshot receipt must be inside its stack runtime")
+    receipt = private_json(location)
+    if (receipt.get("schema") != "ruoyicrm.crit04.prewrite-snapshot.v1"
+            or receipt.get("project") != stack["project"]
+            or receipt.get("method") != method or receipt.get("path") != path
+            or receipt.get("containers") != stack["containers"]
+            or receipt.get("volumes") != stack["volumes"]):
+        raise FenceError("snapshot identity or write case mismatch")
+    try:
+        captured = __import__("datetime").datetime.fromisoformat(receipt["captured_at"])
+        age = (now if now is not None else time.time()) - captured.timestamp()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FenceError("snapshot timestamp invalid") from exc
+    if not -5 <= age <= 300:
+        raise FenceError("pre-write snapshot is stale")
+    for kind, magic in (("mysql", b"-- MySQL dump"), ("redis", b"REDIS")):
+        artifact = receipt.get(kind, {})
+        name = artifact.get("file")
+        if type(name) is not str or not re.fullmatch(r"prewrite-(?:mysql|redis)\.(?:sql|rdb)", name):
+            raise FenceError("snapshot artifact name invalid")
+        file = runtime / name
+        if file.is_symlink() or not file.is_file() or file.stat().st_uid != os.getuid() or file.stat().st_mode & 0o077:
+            raise FenceError("snapshot artifact is not private")
+        if file.stat().st_size < len(magic) or file.stat().st_size > 100_000_000:
+            raise FenceError("snapshot artifact size invalid")
+        with file.open("rb") as stream:
+            if stream.read(len(magic)) != magic:
+                raise FenceError("snapshot artifact format invalid")
+            stream.seek(0)
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if artifact.get("sha256") != digest or artifact.get("bytes") != file.stat().st_size:
+            raise FenceError("snapshot artifact digest mismatch")
+    return {"captured_at": receipt["captured_at"], "snapshot_receipt_sha256": hashlib.sha256(location.read_bytes()).hexdigest()}
+
+
 def app_binding(app_path: Path, stack, runner=run_command):
     """Inspect a live Java PID, its artifact, env port bindings and current sockets."""
     path = Path(app_path).resolve(strict=True)
-    if path.parent != Path(stack["runtime_dir"]) or path.name not in {"source-app.json", "target-app.json"}:
+    if path.parent != Path(stack["runtime_dir"]) or path.name not in {"baseline-app.json", "source-app.json", "target-app.json"}:
         raise FenceError("application receipt is outside its stack runtime")
     app = private_json(path)
     pid, port = app.get("pid"), app.get("port")
@@ -165,20 +209,71 @@ def app_binding(app_path: Path, stack, runner=run_command):
               "RUOYI_TENANT_DB_PORT", "RUOYI_REDIS_HOST", "RUOYI_REDIS_PORT"}
     env = {key: match.group(1) for key in needed
            if (match := re.search(r"(?:^|\s)" + key + r"=([^\s]+)", process))}
-    if set(env) != needed or int(env["RUOYI_HTTP_PORT"]) != port:
-        raise FenceError("application environment lacks exact storage/HTTP bindings")
-    if re.search(r"(?:^|\s)(?:SPRING_CONFIG_|SPRING_APPLICATION_JSON|JAVA_TOOL_OPTIONS|SPRING_DATASOURCE_|SPRING_DATA_REDIS_)[A-Z0-9_]*=", process):
-        raise FenceError("unreviewed runtime configuration override is present")
-    jdbc = env["RUOYI_MASTER_JDBC_URL"]
+    if path.name == "baseline-app.json":
+        if env or "SPRING_APPLICATION_JSON=" not in process:
+            raise FenceError("baseline runtime config is ambiguous")
+        def unique_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise FenceError("duplicate baseline runtime config key")
+                result[key] = value
+            return result
+        raw = process.split("SPRING_APPLICATION_JSON=", 1)[1]
+        try:
+            config, _ = json.JSONDecoder(object_pairs_hook=unique_pairs).raw_decode(raw)
+            flat = {}
+            def flatten(node, prefix=""):
+                for key, value in node.items():
+                    name = prefix + "." + key if prefix else key
+                    if isinstance(value, dict):
+                        flatten(value, name)
+                    else:
+                        flat[name] = value
+            flatten(config)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise FenceError("baseline runtime JSON invalid") from exc
+        expected_keys = {"server.port", "ruoyi.profile", "spring.redis.host", "spring.redis.port",
+                         "spring.redis.password", "spring.datasource.druid.master.url",
+                         "spring.datasource.druid.master.username", "spring.datasource.druid.master.password",
+                         "spring.datasource.druid.statViewServlet.enabled", "spring.datasource.druid.webStatFilter.enabled",
+                         "spring.main.allow-circular-references", "tenant.database.host", "tenant.database.port",
+                         "tenant.database.username", "tenant.database.password", "token.secret"}
+        client = (Path(stack["runtime_dir"]) / "mysql-app.cnf").read_text()
+        credentials = dict(line.split("=", 1) for line in client.splitlines() if "=" in line)
+        redis_password = (Path(stack["runtime_dir"]) / "redis-password").read_text().strip()
+        if (set(flat) != expected_keys or type(flat["server.port"]) is not int or flat["server.port"] != port
+                or not isinstance(flat["ruoyi.profile"], str)
+                or Path(flat["ruoyi.profile"]).resolve() != (Path(stack["runtime_dir"]) / "uploads").resolve()
+                or flat["spring.redis.host"] != "127.0.0.1" or flat["spring.redis.port"] != stack["ports"]["redis"]
+                or flat["spring.redis.password"] != redis_password
+                or flat["spring.datasource.druid.master.username"] != credentials.get("user")
+                or flat["spring.datasource.druid.master.password"] != credentials.get("password")
+                or flat["tenant.database.host"] != "127.0.0.1" or flat["tenant.database.port"] != stack["ports"]["mysql"]
+                or flat["tenant.database.username"] != credentials.get("user")
+                or flat["tenant.database.password"] != credentials.get("password")
+                or flat["spring.datasource.druid.statViewServlet.enabled"] is not False
+                or flat["spring.datasource.druid.webStatFilter.enabled"] is not False
+                or flat["spring.main.allow-circular-references"] is not False
+                or not isinstance(flat["token.secret"], str) or not flat["token.secret"]):
+            raise FenceError("baseline runtime config does not match disposable stack")
+        jdbc = flat["spring.datasource.druid.master.url"]
+    else:
+        if set(env) != needed or int(env["RUOYI_HTTP_PORT"]) != port:
+            raise FenceError("application environment lacks exact storage/HTTP bindings")
+        if re.search(r"(?:^|\s)(?:SPRING_CONFIG_|SPRING_APPLICATION_JSON|JAVA_TOOL_OPTIONS|SPRING_DATASOURCE_|SPRING_DATA_REDIS_)[A-Z0-9_]*=", process):
+            raise FenceError("unreviewed runtime configuration override is present")
+        jdbc = env["RUOYI_MASTER_JDBC_URL"]
     if not jdbc.startswith("jdbc:mysql://"):
         raise FenceError("master JDBC URL is not a direct MySQL URL")
     parsed = urllib.parse.urlparse(jdbc[5:])
     if (parsed.hostname != "127.0.0.1" or parsed.port != stack["ports"]["mysql"]
             or parsed.path != "/rycrm-master" or parsed.username or parsed.password
-            or env["RUOYI_TENANT_DB_HOST"] != "127.0.0.1"
-            or int(env["RUOYI_TENANT_DB_PORT"]) != stack["ports"]["mysql"]
-            or env["RUOYI_REDIS_HOST"] != "127.0.0.1"
-            or int(env["RUOYI_REDIS_PORT"]) != stack["ports"]["redis"]):
+            or (path.name != "baseline-app.json" and
+                (env["RUOYI_TENANT_DB_HOST"] != "127.0.0.1"
+                 or int(env["RUOYI_TENANT_DB_PORT"]) != stack["ports"]["mysql"]
+                 or env["RUOYI_REDIS_HOST"] != "127.0.0.1"
+                 or int(env["RUOYI_REDIS_PORT"]) != stack["ports"]["redis"]))):
         raise FenceError("application points outside its dedicated storage stack")
     sockets = runner("lsof", "-Pan", "-p", str(pid), "-iTCP")
     if any("->" in line and "->127.0.0.1:" not in line for line in sockets.splitlines()):
@@ -191,7 +286,7 @@ def app_binding(app_path: Path, stack, runner=run_command):
 
 
 def authorize_write(source_state, target_state, source_app, target_app, source_url, target_url,
-                    method, path, runner=run_command, now=None):
+                    method, path, source_snapshot=None, target_snapshot=None, runner=run_command, now=None):
     if method not in {"POST", "PUT", "PATCH", "DELETE"} or not isinstance(path, str) or not path.startswith("/") or ".." in path:
         raise FenceError("write method/path invalid")
     source = stack_identity(source_state, runner, now)
@@ -199,6 +294,8 @@ def authorize_write(source_state, target_state, source_app, target_app, source_u
     separate_stacks(source, target)
     verify_tenant_urls(source, runner)
     verify_tenant_urls(target, runner)
+    left_snapshot = verify_snapshot(source_snapshot, source, method, path, now)
+    right_snapshot = verify_snapshot(target_snapshot, target, method, path, now)
     left = app_binding(source_app, source, runner)
     right = app_binding(target_app, target, runner)
     expected = (f"http://127.0.0.1:{left['http_port']}", f"http://127.0.0.1:{right['http_port']}")
@@ -206,5 +303,7 @@ def authorize_write(source_state, target_state, source_app, target_app, source_u
         raise FenceError("HTTP runtimes do not match independently inspected PIDs")
     return {"status": "LOCAL_WRITE_FENCE_PASSED", "method": method, "path": path,
             "source_project": source["project"], "target_project": target["project"],
+            "source_snapshot_sha256": left_snapshot["snapshot_receipt_sha256"],
+            "target_snapshot_sha256": right_snapshot["snapshot_receipt_sha256"],
             "source_jar_sha256": left["jar_sha256"], "target_jar_sha256": right["jar_sha256"],
             "external_evidence": "NOT_RUN", "certification": "NOT_CERTIFIED"}

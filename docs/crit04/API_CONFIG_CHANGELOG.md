@@ -6,18 +6,18 @@
 
 Controller 路由和请求/响应模型未改。回放清单逐项记录 HTTP 方法、路径模板、Java 方法、`@PreAuthorize` 表达式、源码行和 SHA-256；例如 `/login`、`/crm/customer/list`、`/system/user/list`。动态路径值、认证令牌和请求体由隔离环境的 fixture 注入。没有 fixture 的用例保持 `NOT_RUN`。
 
-本地物理双栈已执行 29/150 条：20 条合成账号的认证只读 GET 在 HTTP 状态、Content-Type 和响应体字节上完全一致；9 条未认证权限 GET 是明确的安全契约变更，源版 HTTP 200 / JSON `code:401`，目标 HTTP 401 / 相同 JSON `code:401` 和相同响应体字节，严格比较器仍记 `FAIL`。`ruoyi-ui/src/utils/request.js` 已适配 Axios 的 HTTP 401 错误分支。还有 121 条缺 oracle/fixture 或写隔离授权，保持 `NOT_RUN`。不能把 150 条清单计作 Golden Master 全通过，独立验证也未完成。
+当前 JAR 的本地物理双栈已执行 66/150 条：57 条合成账号的认证只读 GET 在 HTTP 状态、下载相关响应头和响应体字节上完全一致；9 条未认证权限 GET 是明确的安全契约变更，源版 HTTP 200 / JSON `code:401`，目标 HTTP 401 / 相同 JSON `code:401` 和相同响应体字节，严格比较器仍记 `FAIL`。`ruoyi-ui/src/utils/request.js` 已适配 Axios 的 HTTP 401 错误分支。另有 84 条保持 `NOT_RUN`：80 条非 GET 未执行安全写入回放，4 条 GET 有逐项阻断记录 `get-expansion-blockers.json`。不能把 150 条清单计作 Golden Master 全通过，独立验证也未完成。
 
-目标版显式启用 Jackson 2 HTTP 消息转换兼容选项后，之前观察到的 JSON 属性顺序和 8 小时时间字段漂移消失。最终运行身份、逐项结果与受限数据库写入范围见 `PHYSICAL_REPLAY_EVIDENCE.md`、`dual-replay-receipt.json` 和 `post-replay-data-scope.json`。
+目标版显式启用 Jackson 2 HTTP 消息转换兼容选项后，之前观察到的 JSON 属性顺序和 8 小时时间字段漂移消失。目标 Maven 编译器增加 `-parameters` 后，多个路径参数 GET 的 Spring MVC 500 装配错误消失。当前运行身份、逐项结果与受限数据库写入范围见 `PHYSICAL_REPLAY_EVIDENCE.md`、`dual-replay-receipt.json` 和 `expanded-post-replay-data-scope.json`。
 
 ## 配置映射与验收义务
 
 | 当前配置位置 | 当前键或环境输入 | 目标验收义务 | 状态 |
 | --- | --- | --- | --- |
-| `ruoyi-admin/src/main/resources/application.yml` | `server.port` / `RUOYI_HTTP_PORT` | 基线与目标使用不同的回环端口；验证 context path、错误码与响应头 | 局部执行：29 条 GET |
+| `ruoyi-admin/src/main/resources/application.yml` | `server.port` / `RUOYI_HTTP_PORT` | 基线与目标使用不同的回环端口；验证 context path、错误码与响应头 | 局部执行：66 条 GET |
 | 同上 | `spring.data.redis.*` / `RUOYI_REDIS_*` | 两个运行栈接入不同的隔离 Redis 实例或库；验证会话、验证码和退出登录 | 验证码与登录局部执行；退出登录 NOT_RUN |
 | 同上 | `token.header`, `token.secret`, `token.expireTime` / `RUOYI_JWT_SECRET_BASE64` | 验证 JWT 签发、过期、拒绝路径和权限语义；密钥由隔离环境注入 | 签发、认证 GET、未认证拒绝局部执行；过期 NOT_RUN |
-| 同上 | `spring.http.converters.preferred-json-mapper` | 保留源版 Jackson 2 响应序列化；检查时间字段及属性顺序 | 20 条认证 GET 字节一致 |
+| 同上 | `spring.http.converters.preferred-json-mapper` | 保留源版 Jackson 2 响应序列化；检查时间字段及属性顺序 | 57 条认证 GET 字节一致 |
 | 同上 | `mybatis.mapperLocations`, `mybatis.configLocation` | 验证 19 个 Mapper XML 全部加载，150 条 SQL 声明可解析并在目标数据库执行 | NOT_RUN |
 | 同上 | `springdoc.*`, `swagger.*` | 验证 API 文档暴露开关和认证边界 | NOT_RUN |
 | `ruoyi-admin/src/main/resources/application-druid.yml` | `spring.datasource.druid.master.*` / `RUOYI_MASTER_*` | 基线与目标分别接入一次性 MySQL 数据库；比较写前/写后表级与行级状态 | 一次性栈启动及非空表范围已检查；行级差分 NOT_RUN |

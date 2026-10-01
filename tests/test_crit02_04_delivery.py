@@ -31,6 +31,7 @@ class DeliveryBoundaryTests(unittest.TestCase):
         self.assertEqual(saved, crit04_replay.build_manifest())
         self.assertEqual(150, len(saved["cases"]))
         self.assertEqual(150, sum(len(m["statements"]) for m in saved["mapper_sources"]))
+        self.assertEqual("/system/user/", saved["cases"][91]["path_template"])
         for case in saved["cases"]:
             source = (crit04_replay.ROOT / case["controller"]).read_text().splitlines()
             self.assertIn("Mapping", source[case["controller_line"] - 1])
@@ -99,6 +100,44 @@ class DeliveryBoundaryTests(unittest.TestCase):
             self.assertEqual(["BODY_BYTES"], result["difference_dimensions"])
             self.assertEqual(result["baseline"]["canonical_json_sha256"],
                              result["target"]["canonical_json_sha256"])
+        finally:
+            for server in servers:
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join(timeout=2)
+
+    def test_download_header_drift_fails_even_when_body_matches(self):
+        class DownloadHandler(_Handler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Disposition", "attachment; filename=first.txt")
+                self.end_headers()
+                self.wfile.write(self.body)
+
+        class ChangedHeaderHandler(DownloadHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Disposition", "attachment; filename=second.txt")
+                self.end_headers()
+                self.wfile.write(self.body)
+
+        servers = [ThreadingHTTPServer(("127.0.0.1", 0), cls) for cls in (DownloadHandler, ChangedHeaderHandler)]
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+        try:
+            for thread in threads:
+                thread.start()
+            manifest = crit04_replay.build_manifest()
+            manifest["cases"] = [manifest["cases"][0]]
+            case_id = manifest["cases"][0]["id"]
+            urls = [f"http://127.0.0.1:{server.server_port}" for server in servers]
+            fixture = {case_id: {"expected_status": 200,
+                                "expected_body_sha256": hashlib.sha256(_Handler.body).hexdigest()}}
+            result = crit04_replay.replay(manifest, urls[0], urls[1], fixture, False)["results"][0]
+            self.assertEqual("FAIL", result["status"])
+            self.assertEqual(["CONTENT_DISPOSITION"], result["difference_dimensions"])
         finally:
             for server in servers:
                 server.shutdown()

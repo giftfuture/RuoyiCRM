@@ -1873,7 +1873,7 @@
     },
     {
       "http_method": "GET",
-      "path_template": "/system/user",
+      "path_template": "/system/user/",
       "controller": "ruoyi-admin/src/main/java/com/ruoyi/web/controller/system/SysUserController.java",
       "controller_line": 97,
       "controller_sha256": "eb21c8fbfc57d76be6ca3fab61f3add378d14d56c62354d52ead4cbcffd8c416",

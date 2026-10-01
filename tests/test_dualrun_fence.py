@@ -43,6 +43,24 @@ class Fixture:
             client = runtime / "mysql-app.cnf"
             client.write_text("[client]\nuser=synthetic\npassword=synthetic\n")
             os.chmod(client, 0o600)
+            artifacts = {}
+            for kind, filename, data in (("mysql", "prewrite-mysql.sql", b"-- MySQL dump synthetic\n"),
+                                         ("redis", "prewrite-redis.rdb", b"REDIS0011synthetic")):
+                artifact = runtime / filename
+                artifact.write_bytes(data)
+                os.chmod(artifact, 0o600)
+                artifacts[kind] = {"file": filename, "bytes": len(data),
+                                   "sha256": hashlib.sha256(data).hexdigest()}
+            ids = {"mysql": ("a" if name == "a" else "c") * 12,
+                   "redis": ("b" if name == "a" else "d") * 12}
+            volumes = {service: project + "_" + service + "_data" for service in ("mysql", "redis")}
+            snapshot = {"schema": "ruoyicrm.crit04.prewrite-snapshot.v1", "project": project,
+                        "method": "POST", "path": "/system/user", "containers": ids, "volumes": volumes,
+                        "captured_at": __import__("datetime").datetime.fromtimestamp(self.now, __import__("datetime").timezone.utc).isoformat(),
+                        **artifacts}
+            snapshot_path = runtime / "prewrite-snapshot.json"
+            snapshot_path.write_text(json.dumps(snapshot))
+            os.chmod(snapshot_path, 0o600)
 
     def runner(self, *args):
         if args[:2] == ("docker", "ps"):
@@ -104,7 +122,8 @@ class DualRunFenceTests(unittest.TestCase):
         return authorize_write(self.a["runtime"] / "state.json", self.b["runtime"] / "state.json",
                                self.a["runtime"] / "source-app.json", self.b["runtime"] / "target-app.json",
                                f"http://127.0.0.1:{self.a['http']}", f"http://127.0.0.1:{self.b['http']}",
-                               "POST", "/system/user", runner=runner or self.fixture.runner,
+                               "POST", "/system/user", self.a["runtime"] / "prewrite-snapshot.json",
+                               self.b["runtime"] / "prewrite-snapshot.json", runner=runner or self.fixture.runner,
                                now=self.fixture.now)
 
     def test_separate_disposable_projects_volumes_and_app_bindings(self):
@@ -133,6 +152,16 @@ class DualRunFenceTests(unittest.TestCase):
         data["checked_at"] = __import__("datetime").datetime.fromtimestamp(self.fixture.now, __import__("datetime").timezone.utc).isoformat()
         path.write_text(json.dumps(data))
         os.chmod(path, 0o644)
+        with self.assertRaises(FenceError):
+            self.authorize()
+
+    def test_missing_or_tampered_prewrite_snapshot_blocks(self):
+        path = self.a["runtime"] / "prewrite-snapshot.json"
+        path.unlink()
+        with self.assertRaises((FenceError, FileNotFoundError)):
+            self.authorize()
+        path.write_text("{}")
+        os.chmod(path, 0o600)
         with self.assertRaises(FenceError):
             self.authorize()
 

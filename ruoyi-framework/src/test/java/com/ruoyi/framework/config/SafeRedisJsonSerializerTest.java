@@ -9,6 +9,7 @@ import com.ruoyi.common.core.domain.entity.SysDictData;
 import com.ruoyi.common.core.domain.entity.SysUser;
 import com.ruoyi.common.core.domain.model.LoginUser;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -57,5 +58,29 @@ class SafeRedisJsonSerializerTest
                 "{\"version\":1,\"kind\":\"java.lang.Runtime\",\"payload\":{}}".getBytes(StandardCharsets.UTF_8)));
         assertThrows(SerializationException.class, () -> serializer.serialize(new Object()));
         assertThrows(SerializationException.class, () -> serializer.serialize(Map.of("unsafe", List.of("nested"))));
+    }
+
+    @Test
+    void rejectsCyclicAndExcessivelyNestedRedisMaps()
+    {
+        Map<String, Object> cycle = new HashMap<>();
+        cycle.put("self", cycle);
+        assertThrows(SerializationException.class, () -> serializer.serialize(cycle));
+
+        Map<String, Object> deep = Map.of("value", "leaf");
+        for (int depth = 0; depth < 40; depth++)
+        {
+            deep = Map.of("next", deep);
+        }
+        Map<String, Object> excessiveDepth = deep;
+        assertThrows(SerializationException.class, () -> serializer.serialize(excessiveDepth));
+
+        StringBuilder payload = new StringBuilder();
+        for (int depth = 0; depth < 40; depth++) payload.append("{\"next\":");
+        payload.append("\"leaf\"");
+        for (int depth = 0; depth < 40; depth++) payload.append('}');
+        byte[] encoded = ("{\"version\":1,\"kind\":\"repeat-map\",\"payload\":" + payload + "}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertThrows(SerializationException.class, () -> serializer.deserialize(encoded));
     }
 }

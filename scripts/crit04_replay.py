@@ -73,6 +73,10 @@ def source_inventory(root: Path = ROOT) -> dict:
                     break
             for subpath in paths:
                 full_path = "/" + "/".join(part for part in (class_prefix + "/" + subpath).split("/") if part)
+                # `/system/user/` and `/system/user` are distinct under the
+                # source and target MVC mappings. Preserve an explicit slash.
+                if subpath.endswith("/") and not full_path.endswith("/"):
+                    full_path += "/"
                 endpoints.append({
                     "http_method": verb,
                     "path_template": full_path,
@@ -170,6 +174,8 @@ def invoke(base: str, case: dict, fixture: dict, token: str | None) -> dict:
             json_code = None
             canonical_json_sha256 = None
         return {"status": response.status, "content_type": response.headers.get("Content-Type", ""),
+                "content_disposition": response.headers.get("Content-Disposition"),
+                "download_filename": response.headers.get("download-filename"),
                 "body_sha256": digest(payload), "json_code": json_code,
                 "canonical_json_sha256": canonical_json_sha256}
 
@@ -233,6 +239,8 @@ def replay(manifest: dict, baseline: str | None, target: str | None, fixtures: d
                     result["difference_dimensions"] = [name for name, differs in (
                         ("HTTP_STATUS", left["status"] != right["status"]),
                         ("CONTENT_TYPE", left["content_type"] != right["content_type"]),
+                        ("CONTENT_DISPOSITION", left["content_disposition"] != right["content_disposition"]),
+                        ("DOWNLOAD_FILENAME", left["download_filename"] != right["download_filename"]),
                         ("BODY_BYTES", left["body_sha256"] != right["body_sha256"]),
                         ("JSON_VALUES", left["canonical_json_sha256"] != right["canonical_json_sha256"]),
                     ) if differs]
@@ -247,7 +255,7 @@ def replay(manifest: dict, baseline: str | None, target: str | None, fixtures: d
         "failed": sum(item["status"] == "FAIL" for item in results),
         "not_run": sum(item["status"] == "NOT_RUN" for item in results),
         "external_evidence": "NOT_RUN", "certification": "NOT_CERTIFIED",
-        "comparison_scope": "HTTP status, Content-Type, and exact body bytes only; database and Redis state NOT_RUN",
+        "comparison_scope": "HTTP status, Content-Type, Content-Disposition, download-filename, and exact body bytes; database and Redis state NOT_RUN",
         "results": results,
     }
 

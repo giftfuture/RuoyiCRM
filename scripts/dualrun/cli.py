@@ -39,7 +39,7 @@ def main():
     diff.add_argument("--right", required=True, type=Path)
     diff.add_argument("--rules", required=True, type=Path)
     fence = sub.add_parser("fence-write")
-    for name in ("source-state", "target-state", "source-app", "target-app"):
+    for name in ("source-state", "target-state", "source-app", "target-app", "source-snapshot", "target-snapshot"):
         fence.add_argument("--" + name, required=True, type=Path)
     for name in ("source-url", "target-url", "method", "path"):
         fence.add_argument("--" + name, required=True)
@@ -51,7 +51,7 @@ def main():
         else:
             result = authorize_write(args.source_state, args.target_state, args.source_app,
                                      args.target_app, args.source_url, args.target_url,
-                                     args.method, args.path)
+                                     args.method, args.path, args.source_snapshot, args.target_snapshot)
     except (ComparisonError, FenceError, OSError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({"status": "BLOCKED", "reason": type(exc).__name__}))
         return 2
