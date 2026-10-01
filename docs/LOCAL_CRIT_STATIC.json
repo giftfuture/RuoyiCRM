@@ -1,0 +1,13 @@
+{
+  "schema": "ruoyicrm.local-crit-static.v1",
+  "source_sha256": "4561d82d6f74b71e75ae3afc4c1b119aa81b71a85304a73336504ad965764d67",
+  "sbom_sha256": "4995315528ef00aeaed25a178bf64160372665939de1643390f4dc0903cd6fde",
+  "java_files": 247,
+  "xml_files": 21,
+  "pom_files": 7,
+  "resolved_components": 154,
+  "findings": [],
+  "status": "LOCAL_STATIC_ZERO_FINDINGS",
+  "external_evidence": "NOT_RUN",
+  "certification": "NOT_CERTIFIED"
+}

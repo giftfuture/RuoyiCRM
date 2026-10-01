@@ -1,0 +1,20 @@
+steps:
+  - label: ":java: Spring Boot 4 build and regression"
+    key: spring4-regression
+    command: "bash scripts/ci_spring4_regression.sh"
+    timeout_in_minutes: 45
+
+  - label: ":database: Disposable MySQL and Redis routing"
+    key: spring4-physical-stack
+    command: "bash scripts/ci_spring4_physical.sh"
+    depends_on: spring4-regression
+    timeout_in_minutes: 30
+
+  - label: ":package: Application dependency SBOM"
+    key: spring4-sbom
+    command: "bash scripts/ci_spring4_sbom.sh"
+    depends_on: spring4-regression
+    artifact_paths:
+      - "target/bom.json"
+      - "target/crit-static-scan.json"
+    timeout_in_minutes: 20
